@@ -5,6 +5,7 @@ import numpy as np
 import plotly.express as px
 import cv2
 import joblib
+import os
 from datetime import datetime
 
 # ---------------- PAGE CONFIG ----------------
@@ -14,10 +15,12 @@ st.set_page_config(
     layout="wide"
 )
 
-# ---------------- LOAD MODELS ----------------
-risk_model = joblib.load("../models/financial_risk_model.pkl")
-fraud_model = joblib.load("../models/fraud_detection_model.pkl")
 
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+risk_model = joblib.load(os.path.join(BASE_DIR, "../models/financial_risk_model.pkl"))
+fraud_model = joblib.load(os.path.join(BASE_DIR, "../models/fraud_detection_model.pkl"))
 # ---------------- DATABASE ----------------
 conn = sqlite3.connect("users.db", check_same_thread=False)
 c = conn.cursor()
@@ -79,43 +82,34 @@ def reset_password(username,new_password):
     c.execute("UPDATE users SET password=? WHERE username=?",(new_password,username))
     conn.commit()
 
-# ---------------- FINANCE FUNCTIONS ----------------
+# ---------------- FINANCE ----------------
 def save_finance(username,income,emi,expense,savings):
-    c.execute("""
-    INSERT OR REPLACE INTO user_finance VALUES (?,?,?,?,?)
-    """,(username,income,emi,expense,savings))
+    c.execute("INSERT OR REPLACE INTO user_finance VALUES (?,?,?,?,?)",
+              (username,income,emi,expense,savings))
     conn.commit()
 
 def load_finance(username):
     c.execute("SELECT * FROM user_finance WHERE username=?", (username,))
     return c.fetchone()
 
-# ---------------- EXPENSE FUNCTIONS ----------------
+# ---------------- EXPENSE ----------------
 def save_expense(username,category,amount):
-    c.execute("""
-    INSERT INTO expenses (username,category,amount,date)
-    VALUES (?,?,?,?)
-    """,(username,category,amount,str(datetime.now())))
+    c.execute("INSERT INTO expenses VALUES (NULL,?,?,?,?)",
+              (username,category,amount,str(datetime.now())))
     conn.commit()
 
 def load_expenses(username):
-    query = """
-    SELECT category,amount,date
-    FROM expenses
-    WHERE username=?
-    """
-    return pd.read_sql_query(query,conn,params=(username,))
+    return pd.read_sql_query(
+        "SELECT category,amount,date FROM expenses WHERE username=?",
+        conn, params=(username,)
+    )
 
-# ---------------- PAYMENT HISTORY ----------------
+# ---------------- PAYMENTS ----------------
 def load_payments(username):
-
-    query = """
-    SELECT merchant,amount,date,risk_score
-    FROM payment_history
-    WHERE username=?
-    """
-
-    return pd.read_sql_query(query,conn,params=(username,))
+    return pd.read_sql_query(
+        "SELECT merchant,amount,date,risk_score FROM payment_history WHERE username=?",
+        conn, params=(username,)
+    )
 
 # ---------------- SESSION ----------------
 if "logged_in" not in st.session_state:
@@ -136,9 +130,7 @@ def login_page():
 
         if st.button("Login"):
 
-            user = login_user(username,password)
-
-            if user:
+            if login_user(username,password):
                 st.session_state.logged_in = True
                 st.session_state.user = username
                 st.success("Login Successful")
@@ -152,10 +144,11 @@ def login_page():
         new_password = st.text_input("Password",type="password")
 
         if st.button("Register"):
+
             if register_user(new_user,new_password):
                 st.success("Account Created")
             else:
-                st.warning("Username already exists")
+                st.warning("Username exists")
 
     elif choice == "Reset Password":
 
@@ -169,7 +162,7 @@ def login_page():
 # ---------------- ADD EXPENSE ----------------
 def add_expense():
 
-    st.header("💰 Add Daily Expense")
+    st.header("💰 Add Expense")
 
     category = st.selectbox(
         "Category",
@@ -179,223 +172,92 @@ def add_expense():
     amount = st.number_input("Amount",min_value=0)
 
     if st.button("Add Expense"):
-
-        save_expense(
-            st.session_state.user,
-            category,
-            amount
-        )
-
-        st.success("Expense recorded")
+        save_expense(st.session_state.user,category,amount)
+        st.success("Saved")
 
 # ---------------- DASHBOARD ----------------
 def dashboard():
 
-    st.title("📊 Expense Dashboard")
+    st.title("📊 Dashboard")
 
     df = load_expenses(st.session_state.user)
 
     if df.empty:
-        st.info("No expenses yet")
+        st.info("No data")
         return
 
     df["date"] = pd.to_datetime(df["date"])
     today = pd.Timestamp.now()
 
-    week_data = df[df["date"] >= today - pd.Timedelta(days=7)]
-    month_data = df[df["date"] >= today - pd.Timedelta(days=30)]
+    week = df[df["date"] >= today - pd.Timedelta(days=7)]
+    month = df[df["date"] >= today - pd.Timedelta(days=30)]
 
-    weekly_total = week_data["amount"].sum()
-    monthly_total = month_data["amount"].sum()
+    st.metric("Weekly Expense", int(week["amount"].sum()))
+    st.metric("Monthly Expense", int(month["amount"].sum()))
 
-    col1,col2 = st.columns(2)
-    col1.metric("Weekly Expenses",int(weekly_total))
-    col2.metric("Monthly Expenses",int(monthly_total))
-
-    st.subheader("Weekly Expense Distribution")
-
-    fig1 = px.pie(
-        week_data,
-        names="category",
-        values="amount"
-    )
-
-    st.plotly_chart(fig1,use_container_width=True)
-
-    st.subheader("Monthly Expense Distribution")
-
-    fig2 = px.bar(
-        month_data,
-        x="category",
-        y="amount",
-        color="category"
-    )
-
-    st.plotly_chart(fig2,use_container_width=True)
+    st.plotly_chart(px.pie(week, names="category", values="amount"))
+    st.plotly_chart(px.bar(month, x="category", y="amount"))
 
 # ---------------- FINANCIAL RISK ----------------
 def financial_risk():
 
-    st.header("📈 Financial Risk Prediction")
+    st.header("📈 Risk Prediction")
 
-    data = load_finance(st.session_state.user)
+    income = st.number_input("Income")
+    emi = st.number_input("EMI")
+    expense = st.number_input("Expense")
+    savings = st.number_input("Savings")
 
-    if data:
-        income = st.number_input("Income",value=data[1])
-        emi = st.number_input("EMI",value=data[2])
-        expense = st.number_input("Expense",value=data[3])
-        savings = st.number_input("Savings",value=data[4])
-    else:
-        income = st.number_input("Income")
-        emi = st.number_input("EMI")
-        expense = st.number_input("Expense")
-        savings = st.number_input("Savings")
-
-    if st.button("Save Financial Details"):
-        save_finance(st.session_state.user,income,emi,expense,savings)
-        st.success("Saved")
-
-    if st.button("Predict Risk"):
+    if st.button("Predict"):
 
         df = pd.DataFrame([[income,emi,expense,savings]],
         columns=["monthly_income","emi","monthly_expense","savings"])
 
-        risk = risk_model.predict(df)[0]
+        result = risk_model.predict(df)[0]
 
-        st.subheader("Risk Result")
+        st.success(f"Risk: {result}")
 
-        if risk == "Low":
-            st.success("Low Financial Risk")
-
-        elif risk == "Medium":
-            st.warning("Medium Financial Risk")
-
-        else:
-            st.error("High Financial Risk")
-
-        # Financial Health Score
-        if income > 0:
-            score = (savings / income) * 100
-            st.subheader("Financial Health Score")
-            st.progress(min(int(score),100))
-            st.write(f"{round(score,1)} / 100")
-
-# ---------------- QR FRAUD DETECTION ----------------
+# ---------------- QR SCANNER ----------------
 def qr_scanner():
 
     st.header("🔍 QR Fraud Detection")
 
-    uploaded_file = st.file_uploader("Upload QR Image",type=["png","jpg","jpeg"])
+    file = st.file_uploader("Upload QR",type=["png","jpg","jpeg"])
 
-    if uploaded_file:
+    if file:
 
-        file_bytes = np.asarray(bytearray(uploaded_file.read()),dtype=np.uint8)
-        img = cv2.imdecode(file_bytes,1)
-
-        st.image(img,use_container_width=True)
+        img = cv2.imdecode(np.frombuffer(file.read(),np.uint8),1)
+        st.image(img)
 
         detector = cv2.QRCodeDetector()
-        data,bbox,_ = detector.detectAndDecode(img)
+        data,_,_ = detector.detectAndDecode(img)
 
         if data:
 
             st.code(data)
 
-            merchant = "Unknown"
+            amount = st.number_input("Amount")
 
-            if "pn=" in data:
-                merchant = data.split("pn=")[1].split("&")[0]
-
-            st.write("Merchant:",merchant)
-
-            amount = st.number_input("Payment Amount")
-
-            hour = pd.Timestamp.now().hour
-
-            merchant_new = st.selectbox("New Merchant",[0,1])
-
-            txn_today = st.number_input("Transactions Today",0,20)
-
-            if st.button("Analyze QR"):
-
-                sample = pd.DataFrame(
-                [[amount,hour,merchant_new,txn_today]],
+            sample = pd.DataFrame(
+                [[amount,12,1,5]],
                 columns=["amount","hour","merchant_new","txn_count_today"]
-                )
+            )
 
-                result = fraud_model.predict(sample)[0]
-                risk_score = fraud_model.decision_function(sample)[0]
+            result = fraud_model.predict(sample)[0]
 
-                st.metric("Fraud Risk Score",round(risk_score,3))
+            if result == -1:
+                st.error("Fraud Detected")
+            else:
+                st.success("Safe")
 
-                if result == -1:
-                    st.error("🚨 Suspicious QR")
-
-                else:
-                    st.success("QR appears safe")
-
-                c.execute("""
-                INSERT INTO payment_history(username,merchant,amount,date,risk_score)
-                VALUES (?,?,?,?,?)
-                """,(st.session_state.user,merchant,amount,str(datetime.now()),risk_score))
-
-                conn.commit()
-
-# ---------------- PAYMENT HISTORY ----------------
-def payment_dashboard():
-
-    st.header("💳 Payment History")
-
-    df = load_payments(st.session_state.user)
-
-    if df.empty:
-        st.info("No payments yet")
-        return
-
-    df["date"] = pd.to_datetime(df["date"])
-
-    st.dataframe(df)
-
-    st.subheader("Merchant Spending")
-
-    fig = px.bar(
-        df,
-        x="merchant",
-        y="amount",
-        color="merchant"
-    )
-
-    st.plotly_chart(fig,use_container_width=True)
-
-    st.subheader("Fraud Risk Trend")
-
-    fig2 = px.line(
-        df,
-        x="date",
-        y="risk_score"
-    )
-
-    st.plotly_chart(fig2,use_container_width=True)
-
-# ---------------- MAIN APP ----------------
+# ---------------- MAIN ----------------
 if not st.session_state.logged_in:
-
     login_page()
-
 else:
-
-    st.sidebar.success(f"Logged in as {st.session_state.user}")
 
     menu = st.sidebar.selectbox(
         "Navigation",
-        [
-        "Dashboard",
-        "Add Expense",
-        "Financial Risk",
-        "QR Fraud Detection",
-        "Payment History",
-        "Logout"
-        ]
+        ["Dashboard","Add Expense","Financial Risk","QR Scanner","Logout"]
     )
 
     if menu == "Dashboard":
@@ -407,11 +269,8 @@ else:
     elif menu == "Financial Risk":
         financial_risk()
 
-    elif menu == "QR Fraud Detection":
+    elif menu == "QR Scanner":
         qr_scanner()
-
-    elif menu == "Payment History":
-        payment_dashboard()
 
     elif menu == "Logout":
         st.session_state.logged_in = False
